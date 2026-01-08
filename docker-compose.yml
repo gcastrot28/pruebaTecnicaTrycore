@@ -1,0 +1,201 @@
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:16.4
+    container_name: bonita-postgres
+    hostname: postgres-db
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: testpassword
+      POSTGRES_DB: postgres
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./db_scripts/postgres_setup.sh:/docker-entrypoint-initdb.d/01-postgres_setup.sh:ro
+      - ./db_scripts/init-users-dbs.sh:/docker-entrypoint-initdb.d/02-init-users-dbs.sh:ro
+      - ./create-databases.sql:/docker-entrypoint-initdb.d/create-databases.sql:ro
+    ports:
+      - "5432:5432"
+    networks:
+      - bonita-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # Bonita Engine
+  bonita-engine:
+    image: bonitasoft.jfrog.io/docker/bonita-subscription:10.2.3
+    container_name: bonita-engine
+    hostname: bonita-engine
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # Database Configuration - Bonita
+      DB_VENDOR: postgres
+      DB_HOST: postgres-db
+      DB_PORT: 5432
+      DB_USER: bonitauser
+      DB_PASS: myDbSecret
+      DB_NAME: bonita
+      # Database Configuration - BDM
+      BIZ_DB_USER: bizuser
+      BIZ_DB_PASS: myBdmSecret
+      BIZ_DB_NAME: bizdata
+      # Connection Pool - Bonita
+      BONITA_DS_CONNECTION_POOL_INITIAL_SIZE: 2
+      BONITA_DS_CONNECTION_POOL_MAX_TOTAL: 10
+      BONITA_DS_CONNECTION_POOL_MIN_IDLE: 2
+      BONITA_DS_CONNECTION_POOL_MAX_IDLE: 10
+      # Connection Pool - BDM
+      BDM_DS_CONNECTION_POOL_INITIAL_SIZE: 1
+      BDM_DS_CONNECTION_POOL_MAX_TOTAL: 5
+      BDM_DS_CONNECTION_POOL_MIN_IDLE: 1
+      BDM_DS_CONNECTION_POOL_MAX_IDLE: 5
+      # Credentials
+      BONITA_RUNTIME_ADMIN_USERNAME: admin
+      BONITA_RUNTIME_ADMIN_PASSWORD: myAdminSecret
+      PLATFORM_LOGIN: pflogin
+      PLATFORM_PASSWORD: myPfSecret
+      MONITORING_USERNAME: monitoring
+      MONITORING_PASSWORD: myMonitoringSecret
+      # Cluster Configuration
+      CLUSTER_MODE: "true"
+      BONITA_RUNTIME_SESSION_DURATION: "3600000"
+      BONITA_RUNTIME_CLUSTER_HTTP_SESSION_TIMEOUT: "3600"
+      # Remote IP
+      REMOTE_IP_VALVE_ENABLED: "true"
+      # Access Logs
+      ACCESSLOGS_STDOUT_ENABLED: "true"
+      ACCESSLOGS_FILES_ENABLED: "false"
+      # Cache
+      BONITA_PLATFORM_PERSISTENCE_USE_SECOND_LEVEL_CACHE: "false"
+      # Timezone
+      TZ: Europe/Paris
+      # Java Options
+      JAVA_OPTS: >-
+        -Djava.awt.headless=true
+        -XX:+UseContainerSupport -XX:InitialRAMPercentage=60 -XX:MaxRAMPercentage=60 -XX:MinRAMPercentage=60
+        -XX:+HeapDumpOnOutOfMemoryError -XX:HeapDumpPath=/opt/bonita_run/${HOSTNAME}-`date +'%Y%m%d_%H%M%S'`.hprof
+        -XX:+UseG1GC -XX:+UseStringDeduplication -XX:MaxGCPauseMillis=500
+        -XX:InitiatingHeapOccupancyPercent=45
+        -XX:+PrintCommandLineFlags -XX:+PrintGCDetails
+        -Xlog:gc*=info:stdout:time,uptime,level,tags
+        -Dbonita.client.home=/opt/bonita_lic
+        -Dbonita.csrf.cookie.path=/
+    ports:
+      - "8080:8080"
+      - "5701:5701"
+    volumes:
+      - bonita_data:/opt/bonita
+      - ./bonita-license/license.lic:/opt/bonita_lic/license.lic
+    networks:
+      - bonita-network
+    healthcheck:
+      # Check if Bonita is responding on port 8080
+      # Bonita can take 3-5 minutes to fully start
+      # We use a simple port check first, then try HTTP health endpoint if available
+      test: ["CMD-SHELL", "timeout 5 bash -c '</dev/tcp/localhost/8080' 2>/dev/null && (curl -sf -u monitoring:myMonitoringSecret -H 'User-Agent: BonitaHealthCheck/1.0' http://localhost:8080/bonita/healthz >/dev/null 2>&1 || wget --quiet --spider --http-user=monitoring --http-password=myMonitoringSecret --header='User-Agent: BonitaHealthCheck/1.0' http://localhost:8080/bonita/healthz 2>/dev/null || exit 0) || exit 1"]
+      interval: 30s
+      timeout: 15s
+      retries: 20
+      start_period: 300s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 2G
+        reservations:
+          cpus: '2'
+          memory: 2G
+
+  # UI Builder
+  bonita-ui-builder:
+    image: bonitasoft.jfrog.io/docker/bonita-ui-builder:1.3.0
+    container_name: bonita-ui-builder
+    hostname: bonita-ui-builder
+    depends_on:
+      bonita-engine:
+        condition: service_started
+    environment:
+      BONITA_API_URL: http://bonita-engine:8080/bonita/API
+      BONITA_HEALTHCHECK_USER: monitoring
+      BONITA_HEALTHCHECK_PASSWORD: myMonitoringSecret
+      BONITA_DEV_MODE: "false"
+      LOGGING_LEVEL_ROOT: info
+      LOGGING_LEVEL_COM_APPSMITH: info
+      LOGGING_LEVEL_COM_BONITASOFT: info
+      LOGGING_LEVEL_COM_EXTERNAL_PLUGINS: info
+      LOGGING_PATTERN_CONSOLE: "%msg"
+    ports:
+      - "8081:80"
+    networks:
+      - bonita-network
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/appsmith/healthcheck.sh"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 120s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 4G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+
+  # UI Proxy (Nginx)
+  bonita-ui-proxy:
+    image: bonitasoft.jfrog.io/docker/bonita-ui-proxy:1.3.0
+    container_name: bonita-ui-proxy
+    hostname: bonita-ui-proxy
+    depends_on:
+      bonita-engine:
+        condition: service_started
+      bonita-ui-builder:
+        condition: service_started
+    environment:
+      BONITA_HOST: bonita-engine
+      BONITA_PORT: "8080"
+      UIB_HOST: bonita-ui-builder
+      UIB_PORT: "80"
+      NGINX_ACCESS_LOG_ALL: "1"
+      NGINX_ERROR_LOG_LEVEL: error
+    ports:
+      - "80:80"
+    networks:
+      - bonita-network
+    healthcheck:
+      # Check nginx status endpoint
+      test: ["CMD-SHELL", "curl -f http://localhost:90/nginx_status || wget --spider http://localhost:90/nginx_status || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 1G
+        reservations:
+          cpus: '0.5'
+          memory: 256M
+
+volumes:
+  postgres_data:
+    driver: local
+  bonita_data:
+    driver: local
+
+networks:
+  bonita-network:
+    driver: bridge
+    name: bonita-network
