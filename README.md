@@ -136,4 +136,3 @@ Nota: El script crea los usuarios `bonitauser` y `bizuser`, y las bases de datos
 - **Healthchecks fallando**: Los healthchecks pueden fallar inicialmente. Espera a que los servicios se inicien completamente.
 
 Para más información, consulta la documentación oficial de Bonita: https://documentation.bonitasoft.com/</content>
-<parameter name="filePath">c:\Users\GERARDO\Documents\pruebaTrycore\07012025_casoUso\README.md
